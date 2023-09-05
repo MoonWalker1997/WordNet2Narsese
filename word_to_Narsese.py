@@ -34,7 +34,6 @@ def sentence2term(sentence):
 def word2narsese(word: str):
     """
     This function is to change a single word into many Narsese sentences for reasoning.
-    :param word: str
     :return: list[str]
     """
 
@@ -96,8 +95,10 @@ def word2narsese(word: str):
             ret.append("<" + synset_t + " <-> " + convert_util(each.name()) + ">.")
 
         lemmas = synset.lemmas()
-        for lemma in lemmas:
-            ret.append("<" + convert_util(lemma.name()) + " --> " + synset_t + ">. %0.7; 0.9%")
+        for lemma in lemmas:  # lemmas
+            ret.append("<" + convert_util(lemma.name()) + " --> " + synset_t + ">.")
+            for antonym in lemma.antonyms():  # antonyms
+                ret.append("<" + convert_util(antonym.name()) + " <-> " + synset_t + ">. %0.0; 0.9%")
 
         return "\n".join(ret)
 
@@ -111,7 +112,7 @@ def words2narsese(words: list[str]):
     return "\n".join(ret)
 
 
-def run_line(nars: Reasoner, line: str):
+def run_line(nars: Reasoner, line: str):  # PyNARS call
     line = line.strip(' \n')
     if line.startswith("//"):
         return None
@@ -152,7 +153,7 @@ def run_line(nars: Reasoner, line: str):
             out_print(PrintType.ERROR, f'Unknown error: {line}')
 
 
-def handle_lines(nars: Reasoner, lines: str):
+def handle_lines(nars: Reasoner, lines: str):  # PyNARS call
     tasks_lines = []
     for line in lines.split('\n'):
         if len(line) == 0: continue
@@ -199,7 +200,30 @@ def handle_lines(nars: Reasoner, lines: str):
     return ret
 
 
+def result_filtering(reasoning_results):
+    # find positive/negative judgments, pos (f > 0.5), neg (f < 0.5)
+    pos = []
+    neg = []
+
+    for each in reasoning_results:
+        if each.truth.f > 0.5:
+            pos.append(each)
+        elif each.truth.f < 0.5:
+            neg.append(each)
+
+    return pos, neg
+
+
 def next_rank(base, reasoning_results, lower_ranks):
+    """
+    If we have a sentence <A --> B>., and if we call A (or B) the rank_i term, then B (or A) is the rank_i+1 term.
+    "RANK" represents how many sentences are needed.
+    If two same terms are of different ranks, the smaller rank will be chosen.
+    :param base: set(str)
+    :param reasoning_results: list[Task]
+    :param lower_ranks: set(str)
+    :return:
+    """
     rkn = set()
     for each_result in reasoning_results:
         words = {each.word.replace("\"", "") for each in each_result.term.terms}
@@ -284,6 +308,7 @@ if __name__ == "__main__":
     nars = Reasoner(100000, 100000)
 
     reasoning_results = handle_lines(nars, narsese + "\n1000")
+    # reasoning_results = result_filtering(reasoning_results)
 
     # find rank 1 terms
     rk1 = next_rank(original_labels, reasoning_results, [original_labels])
@@ -291,6 +316,12 @@ if __name__ == "__main__":
     rk3 = next_rank(rk2, reasoning_results, [original_labels, rk1, rk2])
     rk4 = next_rank(rk3, reasoning_results, [original_labels, rk1, rk2, rk3])
     rk5 = next_rank(rk4, reasoning_results, [original_labels, rk1, rk2, rk3, rk4])
+
+    print("num rk1 terms: ", len(rk1))
+    print("num rk2 terms: ", len(rk2))
+    print("num rk3 terms: ", len(rk3))
+    print("num rk4 terms: ", len(rk4))
+    print("num rk5 terms: ", len(rk5))
 
     related_terms = list(rk1.union(*[rk2, rk3, rk4, rk5]))
     expanded_labels = terms2nl(related_terms)
