@@ -1,0 +1,5 @@
+.gitignore
+*.txt
+draft.py
+word_to_Narsese.py
+word_to_Narsese_ExAll.py
