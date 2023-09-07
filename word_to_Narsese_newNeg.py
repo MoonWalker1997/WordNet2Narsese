@@ -1,18 +1,14 @@
-import pickle
 import re
-
 from copy import deepcopy
+from typing import List, Tuple
 
-import bidict
 import nltk
-
 from nltk.corpus import wordnet as wn
 
 from pynars import Narsese
 from pynars.NARS import Reasoner as Reasoner
+from pynars.Narsese import Task, parser
 from pynars.utils.Print import out_print, PrintType
-from pynars.Narsese import Task
-from typing import List, Tuple
 
 nltk.download('wordnet')
 
@@ -21,60 +17,47 @@ def convert_util(sentence: str):
     return "\"" + sentence + "\""
 
 
-def sentence2term(sentence):
-    """
-    This function is to change a sentence in natural language (with spaces inside) to a term can be used in Narsese.
-    Symbols in this sentence will be replaced.
-    :param sentence: str
-    :return: str
-    """
-    tmp = list(filter(None, re.split("\W", sentence)))
-
-    return "_".join(tmp)
-
-
 def word2narsese(word: str):
     """
-    This function is to change a single word into many Narsese sentences for reasoning.
-    :return: list[str]
+    Two stages:
+    1) pre-synset processing: build links between i) word and its own synsets, ii) word and its synonyms
+    2) synset processing: build links between i) synset and its related synsets, ii) synset and its lemmas, iii)
+    lemmas with their antonyms (with a higher priority)
+    :return: str
     """
 
     ret = []
 
-    # get synonyms first, they are word-level (not give in synsets)
-    synonyms = wn.synonyms(word)
+    # stage 1
+    # ==================================================================================================================
 
-    # as synonyms, they are similar (word-level)
-    for synonym in synonyms:
-        if len(synonym) != 0:
-            for each_synonym in synonym:
-                # synonym
-                ret.append("<" + convert_util(word) + " <-> " + convert_util(each_synonym) + ">.")
-                synonym_synsets = wn.synsets(each_synonym)
-                for synonym_synset in synonym_synsets:
-                    synset_t = convert_util(synonym_synset.name())  # synset term
-                    # this term can be replaced by the word
-                    ret.append(
-                        "<" + synset_t + " --> " + convert_util(each_synonym) + ">.")
-                    lemmas = synonym_synset.lemmas()
-                    for lemma in lemmas:  # lemmas
-                        ret.append("<" + convert_util(lemma.name()) + " --> " + synset_t + ">.")
-                        for antonym in lemma.antonyms():  # antonyms
-                            ret.append("$0.9; 0.9; 0.9$ <" + convert_util(
-                                antonym.name()) + " <-> " + convert_util(lemma.name()) + ">. %0.0; 0.9%")
+    if "." not in word:
 
-    # get the synsets of the word input, synsets are different meanings of the same word
-    # so each synset is corresponded with a definition
-    # previously, this is processed by wordnet logical form, but now such long sentences can be processed by ImageBind
-    # by the way, this will not change the reasoning process, since everything used through wordnet will share the
-    # same definition, may think that is just a long term
+        synsets = []  # for stage 2 processing
 
-    synsets = wn.synsets(word)
+        synonyms = wn.synonyms(word)  # get synonyms first, they are word-level (not give in synsets)
+        # build links between word and its synonyms
+        for synonym in synonyms:
+            if len(synonym) != 0:
+                for each_synonym in synonym:
+                    # synonym
+                    ret.append("<" + convert_util(word) + " <-> " + convert_util(each_synonym) + ">.")
+
+        # build links between word and its synsets
+        for each_synset in wn.synsets(word):
+            synsets.append(each_synset)  # add to stage 2 processing
+            synset_t = convert_util(each_synset.name())  # synset term
+            ret.append("<" + synset_t + " --> " + convert_util(word) + ">.")
+
+    else:
+        synsets = [wn.synset(word)]
+
+    # stage 2
+    # ==================================================================================================================
 
     for synset in synsets:
 
         synset_t = convert_util(synset.name())  # synset term
-        ret.append("<" + synset_t + " --> " + convert_util(word) + ">.")  # this term can be replaced by the word
 
         for each in synset.hypernyms():  # hypernyms
             ret.append("<" + synset_t + " --> " + convert_util(each.name()) + ">.")
@@ -111,12 +94,12 @@ def word2narsese(word: str):
 
         lemmas = synset.lemmas()
         for lemma in lemmas:  # lemmas
-            ret.append("<" + convert_util(lemma.name()) + " --> " + synset_t + ">.")
-            for antonym in lemma.antonyms():  # antonyms
-                ret.append("$0.9; 0.9; 0.9$ <" + convert_util(antonym.name()) + " <-> " + convert_util(
-                    lemma.name()) + ">. %0.0; 0.9%")
+            lemma_t = convert_util(lemma.name())
+            ret.append("<" + lemma_t + " --> " + synset_t + ">.")
+            for antonym in lemma.antonyms():  # antonyms, higher priority
+                ret.append("$0.9; 0.9; 0.5$ <" + convert_util(antonym.name()) + " <-> " + lemma_t + ">. %0.0; 0.9%")
 
-        return "\n".join(ret)
+    return "\n".join(ret)
 
 
 def words2narsese(words: list[str]):
@@ -157,7 +140,7 @@ def run_line(nars: Reasoner, line: str):  # PyNARS call
         if len(line) == 0:
             return None
         try:
-            success, task, _ = nars.input_narsese(line, go_cycle=False)
+            success, task, _ = nars.input_narsese(line, go_cycle=True)
             if success:
                 out_print(PrintType.IN, task.sentence.repr(), *task.budget)
             else:
@@ -217,57 +200,70 @@ def handle_lines(nars: Reasoner, lines: str):  # PyNARS call
 
 
 def result_filtering(reasoning_results):
-    # find positive/negative judgments, pos (f > 0.5), neg (f < 0.5)
+    # find strong results only
     pos = []
-    neg = []
 
     for each in reasoning_results:
         if each.truth.f > 0.9:
             pos.append(each)
-        elif each.truth.f < 0.9:
-            neg.append(each)
 
-    return pos, neg
+    return pos
 
 
-# ======================================================================================================================
-
-
-# def next_rank(base, reasoning_results, lower_ranks):
-#     """
-#     If we have a sentence <A --> B>., and if we call A (or B) the rank_i term, then B (or A) is the rank_i+1 term.
-#     "RANK" represents how many sentences are needed.
-#     If two same terms are of different ranks, the smaller rank will be chosen.
-#     :param base: set(str)
-#     :param reasoning_results: list[Task]
-#     :param lower_ranks: set(str)
-#     :return:
-#     """
-#     rkn = set()
-#     for each_result in reasoning_results:
-#         words = {each.word.replace("\"", "") for each in each_result.term.terms}
-#         for word in words:
-#             if word in base:
-#                 rkn = rkn.union(words.difference({word}))
-#     for lower_rank in lower_ranks:
-#         rkn.difference_update(lower_rank)
-#     return rkn
-
-
-# ======================================================================================================================
-
-
-def degree_of_terms(reasoning_results):
-    dic = {}
+def next_rank(base, reasoning_results, lower_ranks):
+    """
+    If we have a sentence <A --> B>., and if we call A (or B) the rank_i term, then B (or A) is the rank_i+1 term.
+    "RANK" represents how many sentences are needed.
+    If two same terms are of different ranks, the smaller rank will be chosen.
+    :param base: dic
+    :param reasoning_results: list[Task]
+    :param lower_ranks: list[dic]
+    :return: dic
+    """
+    rkn = {}
     for each_result in reasoning_results:
-        words = {each.word.replace("\"", "") for each in each_result.term.terms}
-        for word in words:
-            if word in dic:
-                dic[word] += 1
-            else:
-                dic.update({word: 1})
-    tmp = [(each, dic[each]) for each in dic]
-    return sorted(tmp, key=lambda x: x[1], reverse=True)
+        if each_result.term.word[0] == "(":
+            continue
+        words = [each.word.replace("\"", "") for each in each_result.term.terms]  # get sub-terms
+        for i, word in enumerate(words):
+            # if a sub-term is in the base, then all remaining sub-terms will be rank_next terms
+            if word in base:
+                for j in range(len(words)):
+                    if j == i or words[j][0] == "(":
+                        continue
+                    elif words[j] in rkn:
+                        rkn[words[j]] = [rkn[words[j]][0] + 1, (rkn[words[j]][1] + each_result.truth.e) / 2]
+                    else:
+                        rkn.update({words[j]: [1, each_result.truth.e]})
+
+    tmp = deepcopy(rkn)
+    for each in rkn:
+        for lower_rank in lower_ranks:
+            if each in lower_rank:
+                tmp.pop(each)
+                break
+
+    pos, neg = {}, {}
+    for each in tmp:
+
+        related_narsese = word2narsese(each)  # str
+        related_narsese = [parser.parse(each) for each in related_narsese.split("\n")]  # Task
+
+        related_terms = []
+        for each_result in related_narsese:
+            related_terms += [each.word.replace("\"", "") for each in each_result.term.terms]  # get sub-terms
+
+        A = len(set(related_terms))
+        B = len(set(related_terms).difference(tmp.keys()))
+
+        tmp[each] = tmp[each] + [B/A]
+
+        if B/A < 0.4:
+            pos.update({each: tmp[each]})
+        else:
+            neg.update({each: tmp[each]})
+
+    return tmp, pos, neg
 
 
 def term2nl_util(term, ret):
@@ -284,9 +280,12 @@ def term2nl_util(term, ret):
     return ret
 
 
-def term2nl(term, connector):
-    components = term2nl_util(term, set())
-    return connector.join(components)
+def term2nl(term, connector=None):
+    if connector is not None:
+        components = term2nl_util(term, set())
+        return connector.join(components)
+    else:
+        return list(term2nl_util(term, set()))[0]
 
 
 def terms2nl(terms):
@@ -297,6 +296,8 @@ def terms2nl(terms):
                 ret.append(term2nl(term, " and "))
             elif term[1] == "|":
                 ret.append(term2nl(term, " or "))
+            else:
+                ret.append(term2nl(term))
         except:
             continue
     return ret
@@ -323,64 +324,42 @@ if __name__ == "__main__":
                              "normal",
                              "event"])
 
-    original_labels = {"abuse",
-                       "burglary",
-                       "robbery",
-                       "stealing",
-                       "shooting",
-                       "shoplifting",
-                       "assault",
-                       "fighting",
-                       "arson",
-                       "explosion",
-                       "arrest",
-                       "(&,car,accident)",
-                       "(&,accident, car)",
-                       "vandalism",
-                       "(&,normal,event)",
-                       "(&,event,normal)"}
+    original_labels = {"abuse": [1, 0.9],
+                       "burglary": [1, 0.9],
+                       "robbery": [1, 0.9],
+                       "stealing": [1, 0.9],
+                       "shooting": [1, 0.9],
+                       "shoplifting": [1, 0.9],
+                       "assault": [1, 0.9],
+                       "fighting": [1, 0.9],
+                       "arson": [1, 0.9],
+                       "explosion": [1, 0.9],
+                       "arrest": [1, 0.9],
+                       "car": [1, 0.9],
+                       "accident": [1, 0.9],
+                       "vandalism": [1, 0.9],
+                       "normal": [1, 0.9],
+                       "event": [1, 0.9]}
 
     nars = Reasoner(100000, 100000)
 
-    reasoning_results = handle_lines(nars, narsese + "\n1000")
+    reasoning_results = handle_lines(nars, narsese + "\n10000")
 
-    pos, neg = result_filtering(reasoning_results)
-    pos_terms = degree_of_terms(pos)
-    neg_terms = degree_of_terms(neg)
+    strong_results = result_filtering(reasoning_results)
 
-    # ==================================================================================================================
+    rk1, pos1, neg1 = next_rank(original_labels, strong_results, [original_labels])
+    rk2, pos2, neg2 = next_rank(rk1, strong_results, [original_labels, rk1])
+    rk3, pos3, neg3 = next_rank(rk2, strong_results, [original_labels, rk1, rk2])
 
-    # find rank 1 terms
-    # rk1 = next_rank(original_labels, reasoning_results, [original_labels])
-    # rk2 = next_rank(rk1, reasoning_results, [original_labels, rk1])
-    # rk3 = next_rank(rk2, reasoning_results, [original_labels, rk1, rk2])
-    # rk4 = next_rank(rk3, reasoning_results, [original_labels, rk1, rk2, rk3])
-    # rk5 = next_rank(rk4, reasoning_results, [original_labels, rk1, rk2, rk3, rk4])
+    pos1.update(pos2)
+    pos1.update(pos3)
+    neg1.update(neg2)
+    neg1.update(neg3)
 
-    # print("num rk1 terms: ", len(rk1))
-    # print("num rk2 terms: ", len(rk2))
-    # print("num rk3 terms: ", len(rk3))
-    # print("num rk4 terms: ", len(rk4))
-    # print("num rk5 terms: ", len(rk5))
+    with open("expanded labels newNeg pos.txt", "w") as file:
+        for each in pos1.keys():
+            file.write(each + "\n")
 
-    # related_terms = list(rk1.union(*[rk2, rk3, rk4, rk5]))
-    # expanded_labels = terms2nl(related_terms)
-
-    # print(len(expanded_labels))
-
-    # with open("expanded labels.txt", "w") as file:
-    #     for each in expanded_labels:
-    #         file.write(each + "\n")
-
-    # ==================================================================================================================
-
-    pos_labels = terms2nl(pos_terms)
-    neg_labels = terms2nl(neg_terms)
-
-    print(pos_labels)
-    print("========")
-    print(neg_labels)
-
-    # with open("expanded labels.txt", "w") as file:
-    #     for each in expanded_labels:
-    #         file.write(each + "\n")
+    with open("expanded labels newNeg neg.txt", "w") as file:
+        for each in neg1.keys():
+            file.write(each + "\n")
